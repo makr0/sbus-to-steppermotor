@@ -1,9 +1,11 @@
+#include <avr/io.h>
+#include <util/delay.h>
 #include <Arduino.h>
 #include "SBUS.h"
-#include <AccelStepper.h>
+#include "LowPass.h"
 
 #define M1_enable 10
-#define M1_step 4
+#define M1_step 9 // 4
 #define M1_dir 8
 
 #define M2_enable 10
@@ -12,27 +14,25 @@
 
 #define MOTORS_RESET 14
 #define M1_MS3 7
-#define M2_MS3 9
+#define M2_MS3 4 // 9
 
 #define MX_MS2 15
 #define MX_MS1 16
 
 #define CHANNEL_ENABLE 5
-#define MOTOR_MAX_SPEED 3000
-#define MOTOR_MAX_SPEED_FULLSTEP 3000
+#define MOTOR_MAX_SPEED 15000
 #define CHANNEL_MIN 342
 #define CHANNEL_MAX 1706
 #define CHANNEL_MITTE 1024
 #define RC_TOTZONE 50
-#define CHANNEL_M1 1
-#define CHANNEL_M2 2
-#define SWITCHPOINT1 120
-#define SWITCHPOINT2 190
-#define SWITCHPOINT3 275
+#define CHANNEL_M1 0
+#define CHANNEL_M2 1
 
+#define IDLE_TIMEOUT 200;
+int idleTimer = 0;
 
-AccelStepper motor1(AccelStepper::DRIVER, M1_step, M1_dir);
-AccelStepper motor2(AccelStepper::DRIVER, M2_step, M2_dir);
+LowPass FilterM1;
+LowPass FilterM2;
 
 // a SBUS object, which is on hardware
 // serial port 1
@@ -60,26 +60,81 @@ float M2_speed = 0;
 // for Channel calculations
 int stepMode = 32;
 
-void initTimerInterrupt()
+struct CTC1
 {
-  cli();      // stop interrupts
-  TCCR1A = 0; // set entire TCCR1A register to 0
-  TCCR1B = 0; // same for TCCR1B
-  TCNT1 = 0;  // initialize counter value to 0
-  // set compare match register to some 'fast' value
-  //OCR1A = (8000000 >> 8) / 13;
-  OCR1A = 2700;
-  // turn on CTC mode
-  TCCR1B |= (1 << WGM12);
-  // Set CS01 bit for no prescaler
-  TCCR1B |= (1 << CS10);
-  // enable timer compare interrupt on start
-  TIMSK1 |= (1 << OCIE1A);
-  // disable timer compare interrupt on start
-  //TIMSK1 &= ~(1 << OCIE1A);
+    static void setup() {
+        TCCR1A = 0; // CTC mode with TOP-OCR1A
+        TCCR1B = _BV(WGM12);
+        TCCR1A = (TCCR1A & ~(_BV(COM1A1) | _BV(COM1A0))) | _BV(COM1A0); // toggle channel A on compare match
+        DDRB |= _BV(5); // set channel A bound pin to output mode // PB1 on 328p, use _BV(5) for PB5 on 32U4
+    }
 
-  sei(); // allow interrupts
-}
+    static void set_freq(float f) {
+        static const float f1 = min_freq(1), f8 = min_freq(8), f64 = min_freq(64), f256 = min_freq(256);
+        uint16_t n;
+        if (f >= f1)        n = 1;
+        else if (f >= f8)   n = 8;
+        else if (f >= f64)  n = 64;
+        else if (f >= f256) n = 256;
+        else                n = 1024;
+        prescale(n);
+        OCR1A = static_cast<uint16_t>(round(F_CPU / (2 * n * f) - 1));
+    }
+
+    static void prescale(uint16_t n) {
+        uint8_t bits = 0;
+        switch (n) {
+            case    1:  bits = _BV(CS10);               break;
+            case    8:  bits = _BV(CS11);               break;
+            case   64:  bits = _BV(CS11) | _BV(CS10);   break;
+            case  256:  bits = _BV(CS12);               break;
+            case 1024:  bits = _BV(CS12) | _BV(CS10);   break;
+            default:    bits = 0;
+        }
+        TCCR1B = (TCCR1B & ~(_BV(CS12) | _BV(CS11) | _BV(CS10))) | bits;
+    }
+    static inline float min_freq(uint16_t n) {
+        return ceil(F_CPU / (2 * n * 65536));
+    }
+};
+
+struct CTC2
+{
+    static void setup() {
+        TCCR3A = 0; // CTC mode with TOP-OCR1A
+        TCCR3B = _BV(WGM12);
+        TCCR3A = (TCCR3A & ~(_BV(COM3A1) | _BV(COM3A0))) | _BV(COM3A0); // toggle channel A on compare match
+        DDRC |= _BV(6); // set channel A bound pin to output mode // _BV(6) for PC6 on 32U4
+    }
+
+    static void set_freq(float f) {
+        static const float f1 = min_freq(1), f8 = min_freq(8), f64 = min_freq(64), f256 = min_freq(256);
+        uint16_t n;
+        if (f >= f1)        n = 1;
+        else if (f >= f8)   n = 8;
+        else if (f >= f64)  n = 64;
+        else if (f >= f256) n = 256;
+        else                n = 1024;
+        prescale(n);
+        OCR3A = static_cast<uint16_t>(round(F_CPU / (2 * n * f) - 1));
+    }
+
+    static void prescale(uint16_t n) {
+        uint8_t bits = 0;
+        switch (n) {
+            case    1:  bits = _BV(CS10);               break;
+            case    8:  bits = _BV(CS11);               break;
+            case   64:  bits = _BV(CS11) | _BV(CS10);   break;
+            case  256:  bits = _BV(CS12);               break;
+            case 1024:  bits = _BV(CS12) | _BV(CS10);   break;
+            default:    bits = 0;
+        }
+        TCCR3B = (TCCR3B & ~(_BV(CS32) | _BV(CS31) | _BV(CS30))) | bits;
+    }
+    static inline float min_freq(uint16_t n) {
+        return ceil(F_CPU / (2 * n * 65536));
+    }
+};
 
 void MOTOR_STEP(int mode)
 {
@@ -118,9 +173,28 @@ void MOTOR_STEP(int mode)
   }
 }
 
+void enableMotors(int mode) {
+    digitalWrite(M1_enable, !mode); // enable/disable motor
+    digitalWrite(M2_enable, !mode); // enable/disable motor
+}
+
+void setMotorSpeed(int motor, int speed){
+  if(motor==1) {
+    speed = FilterM1.step(speed);
+    digitalWrite(M1_dir,speed>0);
+    CTC1::set_freq(abs(speed));
+  }
+  if(motor==2) {
+    speed = FilterM2.step(speed);
+    digitalWrite(M2_dir,speed>0);
+    CTC2::set_freq(abs(speed));
+  }
+}
+
 void setup()
 {
-  initTimerInterrupt();
+  CTC1::setup();
+  CTC2::setup();
   delay(100);
   pinMode(M1_enable, OUTPUT);
   pinMode(M1_step, OUTPUT);
@@ -137,19 +211,7 @@ void setup()
 
   MOTOR_STEP(stepMode);
 
-  motor1.setEnablePin(M1_enable);
-  motor2.setEnablePin(M2_enable);
-  motor1.setPinsInverted(false, false, true);
-  motor2.setPinsInverted(false, false, true);
-  motor1.setMaxSpeed(MOTOR_MAX_SPEED);
-  motor2.setMaxSpeed(MOTOR_MAX_SPEED);
-  motor1.setSpeed(0);
-  motor2.setSpeed(0);
-  //motor1.setAcceleration(100);
-  //motor2.setAcceleration(200);
-  motor1.disableOutputs();
-  motor2.disableOutputs();
-
+  enableMotors(false);
   // begin the SBUS communication
   Serial.begin(9600);
   //while(!Serial);
@@ -157,11 +219,6 @@ void setup()
   x8r.begin();
 }
 
-ISR(TIMER1_COMPA_vect)
-{
-  motor1.runSpeed();
-  motor2.runSpeed();
-}
 void debug_channels()
 {
   for (i = 0; i < NUM_CHANNELS; i++)
@@ -196,49 +253,49 @@ void loop()
         raw_channels[i] = CHANNEL_MITTE;
       }
     }
-    if(raw_channels[CHANNEL_M1] > CHANNEL_MITTE+SWITCHPOINT3 || raw_channels[CHANNEL_M2] > CHANNEL_MITTE+SWITCHPOINT3 ) stepMode=1;
-    else if(raw_channels[CHANNEL_M1] < CHANNEL_MITTE-SWITCHPOINT3 || raw_channels[CHANNEL_M2] < CHANNEL_MITTE-SWITCHPOINT3 ) stepMode=1;
-    else if(raw_channels[CHANNEL_M1] > CHANNEL_MITTE+SWITCHPOINT2 || raw_channels[CHANNEL_M2] > CHANNEL_MITTE+SWITCHPOINT2 ) stepMode=2;
-    else if(raw_channels[CHANNEL_M1] < CHANNEL_MITTE-SWITCHPOINT2 || raw_channels[CHANNEL_M2] < CHANNEL_MITTE-SWITCHPOINT2 ) stepMode=2;
-    else if(raw_channels[CHANNEL_M1] > CHANNEL_MITTE+SWITCHPOINT1 || raw_channels[CHANNEL_M2] > CHANNEL_MITTE+SWITCHPOINT1 ) stepMode=4;
-    else if(raw_channels[CHANNEL_M1] < CHANNEL_MITTE-SWITCHPOINT1 || raw_channels[CHANNEL_M2] < CHANNEL_MITTE-SWITCHPOINT1 ) stepMode=4;
-    else stepMode=32;
 
-    M1_speed = map(raw_channels[CHANNEL_M1], CHANNEL_MIN, CHANNEL_MAX, -MOTOR_MAX_SPEED, MOTOR_MAX_SPEED) * (stepMode==32?32:stepMode==4?1:stepMode==2?1:0.7);
-    M2_speed = map(raw_channels[CHANNEL_M2], CHANNEL_MIN, CHANNEL_MAX, -MOTOR_MAX_SPEED, MOTOR_MAX_SPEED) * (stepMode==32?32:stepMode==4?1:stepMode==2?1:0.7);
-    M1_speed = constrain(M1_speed,-(stepMode==1?MOTOR_MAX_SPEED_FULLSTEP:MOTOR_MAX_SPEED), (stepMode==1?MOTOR_MAX_SPEED_FULLSTEP:MOTOR_MAX_SPEED));
-    M2_speed = constrain(M2_speed,-(stepMode==1?MOTOR_MAX_SPEED_FULLSTEP:MOTOR_MAX_SPEED), (stepMode==1?MOTOR_MAX_SPEED_FULLSTEP:MOTOR_MAX_SPEED));
-    if(abs(M1_speed+M2_speed)>150) stepMode = constrain(stepMode,4,32);
+    M1_speed = map(raw_channels[CHANNEL_M1], CHANNEL_MIN, CHANNEL_MAX, -MOTOR_MAX_SPEED, MOTOR_MAX_SPEED);
+    M2_speed = map(raw_channels[CHANNEL_M2], CHANNEL_MIN, CHANNEL_MAX, -MOTOR_MAX_SPEED, MOTOR_MAX_SPEED);
+
     if (updateSerial-- == 0)
     {
       updateSerial = 5;
       sprintf(uart_buf, "CHM1: %4d CHM2 %4d | M1: %4ld M2: %4ld | step %2d    \r", raw_channels[CHANNEL_M1], raw_channels[CHANNEL_M2], (int32_t)M1_speed, (int32_t)M2_speed, stepMode);
       Serial.print(uart_buf);
+      //debug_channels();
     }
     if (failSafe)
     {
-      motor1.stop();
-      motor2.stop();
-      motor1.disableOutputs();
-      motor2.disableOutputs();
+      setMotorSpeed(1,0);
+      setMotorSpeed(2,0);
+      enableMotors(false);
     }
     else
     {
-      MOTOR_STEP(stepMode);
-      motor1.setSpeed(M1_speed);
-      motor2.setSpeed(M2_speed);
+      setMotorSpeed(1,M1_speed);
+      setMotorSpeed(2,M2_speed);
+      if(M1_speed == 0 && M1_speed==0) {
+        if(idleTimer == 0) {
+          enableMotors(false);
+        } else {
+          idleTimer--;
+        }
+      } else {
+        if(idleTimer == 0) {
+          enableMotors(true);
+        }
+        idleTimer = IDLE_TIMEOUT;
+      }
       if (enable_last != raw_channels[CHANNEL_ENABLE])
       {
         enable_last = raw_channels[CHANNEL_ENABLE];
         if (enable_last > 1000)
         {
-          motor1.enableOutputs();
-          motor2.enableOutputs();
+          enableMotors(true);
         }
         else
         {
-          motor1.disableOutputs();
-          motor2.disableOutputs();
+          enableMotors(false);
         }
       }
     }
