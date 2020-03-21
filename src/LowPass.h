@@ -6,8 +6,9 @@ class  LowPass
 {
 	private:
 		float v[2];
+		int switchpoint;
 	public:
-		LowPass();
+		LowPass(int s);
 		int step(int x);
 };
 

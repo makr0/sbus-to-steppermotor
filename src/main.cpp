@@ -28,11 +28,13 @@
 #define CHANNEL_M1 0
 #define CHANNEL_M2 1
 
-#define IDLE_TIMEOUT 200;
+#define SWITCHPOINT (MOTOR_MAX_SPEED * 0.66)
+
+#define IDLE_TIMEOUT 1000;
 int idleTimer = 0;
 
-LowPass FilterM1;
-LowPass FilterM2;
+LowPass FilterM1(SWITCHPOINT);
+LowPass FilterM2(SWITCHPOINT);
 
 // a SBUS object, which is on hardware
 // serial port 1
@@ -78,7 +80,12 @@ struct CTC1
         else if (f >= f256) n = 256;
         else                n = 1024;
         prescale(n);
-        OCR1A = static_cast<uint16_t>(round(F_CPU / (2 * n * f) - 1));
+          OCR1A = static_cast<uint16_t>(round(F_CPU / (2 * n * f) - 1));
+        if(f>0) {
+          TCCR1A = (TCCR1A & ~(_BV(COM1A1) | _BV(COM1A0))) | _BV(COM1A0); // toggle channel A on compare match
+        } else {
+          TCCR1A = (TCCR1A & ~(_BV(COM1A1) | _BV(COM1A0))); // disable toggling of channel A on compare match
+        }
     }
 
     static void prescale(uint16_t n) {
@@ -117,6 +124,11 @@ struct CTC2
         else                n = 1024;
         prescale(n);
         OCR3A = static_cast<uint16_t>(round(F_CPU / (2 * n * f) - 1));
+        if(f>0) {
+          TCCR3A = (TCCR3A & ~(_BV(COM3A1) | _BV(COM3A0))) | _BV(COM3A0); // toggle channel A on compare match
+        } else {
+          TCCR3A = (TCCR3A & ~(_BV(COM3A1) | _BV(COM3A0))); // disable toggling of channel A on compare match
+        }
     }
 
     static void prescale(uint16_t n) {
@@ -160,6 +172,12 @@ void MOTOR_STEP(int mode)
     break;
   case 8:
     digitalWrite(M1_MS3, LOW);
+    digitalWrite(M2_MS3, LOW);
+    digitalWrite(MX_MS2, HIGH);
+    digitalWrite(MX_MS1, HIGH);
+    break;
+  case 16:
+    digitalWrite(M1_MS3, HIGH);
     digitalWrite(M2_MS3, LOW);
     digitalWrite(MX_MS2, HIGH);
     digitalWrite(MX_MS1, HIGH);
@@ -256,6 +274,13 @@ void loop()
 
     M1_speed = map(raw_channels[CHANNEL_M1], CHANNEL_MIN, CHANNEL_MAX, -MOTOR_MAX_SPEED, MOTOR_MAX_SPEED);
     M2_speed = map(raw_channels[CHANNEL_M2], CHANNEL_MIN, CHANNEL_MAX, -MOTOR_MAX_SPEED, MOTOR_MAX_SPEED);
+    if(abs(M1_speed) > SWITCHPOINT || abs(M2_speed) > SWITCHPOINT) {
+      stepMode = 8;
+      M1_speed = M1_speed / (3 - map(abs(M1_speed),SWITCHPOINT,MOTOR_MAX_SPEED,0,2));
+      M2_speed = M2_speed / (3 - map(abs(M2_speed),SWITCHPOINT,MOTOR_MAX_SPEED,0,2));
+    } else {
+      stepMode = 32;
+    }
 
     if (updateSerial-- == 0)
     {
@@ -272,6 +297,7 @@ void loop()
     }
     else
     {
+      MOTOR_STEP(stepMode);
       setMotorSpeed(1,M1_speed);
       setMotorSpeed(2,M2_speed);
       if(M1_speed == 0 && M1_speed==0) {
