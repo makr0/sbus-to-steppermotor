@@ -7,8 +7,10 @@ class  LowPass
 	private:
 		float v[2];
 		int switchpoint;
+		bool fastResponse;
 	public:
 		LowPass(int s);
+		void setResponse(bool fast);
 		int step(int x);
 };
 

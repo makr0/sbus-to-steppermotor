@@ -3,15 +3,19 @@
 LowPass::LowPass(int s) {
     v[0]=0.0;
     switchpoint = s;
+    fastResponse = true;
 }
+void LowPass::setResponse(bool fast){
+    fastResponse = fast;
+} //class II 
 int LowPass::step(int x){ //class II 
     v[0] = v[1];
-    if( x > switchpoint) {
-        v[1] = (1.546629140310340489e-2 * x)
-			 + (0.96906741719379319022 * v[0]);
+    if(fastResponse) {
+        v[1] = (1.3e-1 * x)
+		     + (0.72 * v[0]);
     } else {
-        v[1] = (1.367287359973195227e-1 * x)
-		     + (0.72654252800536101020 * v[0]);    
+        v[1] = (6.244035046342855111e-3 * x)
+			 + (0.98751192990731428978 * v[0]);
     }
     return (int)(v[0] + v[1]);
 }
