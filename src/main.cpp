@@ -20,21 +20,20 @@
 #define MX_MS1 16
 
 #define CHANNEL_ENABLE 5
-#define MOTOR_MAX_SPEED 30000
+#define MOTOR_MAX_SPEED 35000
 #define CHANNEL_MIN 342
 #define CHANNEL_MAX 1706
 #define CHANNEL_MITTE 1024
 #define RC_TOTZONE 50
 #define CHANNEL_M1 0
 #define CHANNEL_M2 1
-
-#define SWITCHPOINT (MOTOR_MAX_SPEED * 0.66)
+#define CHANNEL_GEAR 6
 
 #define IDLE_TIMEOUT 1000;
 int idleTimer = 0;
 
-LowPass FilterM1(SWITCHPOINT);
-LowPass FilterM2(SWITCHPOINT);
+LowPass FilterM1;
+LowPass FilterM2;
 
 // a SBUS object, which is on hardware
 // serial port 1
@@ -196,15 +195,13 @@ void enableMotors(int mode) {
     digitalWrite(M2_enable, !mode); // enable/disable motor
 }
 
-void setMotorSpeed(int motor, int speed, int mode){
+void setMotorSpeed(int motor, int speed){
   if(motor==1) {
-    FilterM1.setResponse(mode == 32);
     speed = FilterM1.step(speed);
     digitalWrite(M1_dir,speed>0);
     CTC1::set_freq(abs(speed));
   }
   if(motor==2) {
-    FilterM2.setResponse(mode == 32);
     speed = FilterM2.step(speed);
     digitalWrite(M2_dir,speed>0);
     CTC2::set_freq(abs(speed));
@@ -276,10 +273,9 @@ void loop()
 
     M1_speed = map(raw_channels[CHANNEL_M1], CHANNEL_MIN, CHANNEL_MAX, -MOTOR_MAX_SPEED, MOTOR_MAX_SPEED);
     M2_speed = map(raw_channels[CHANNEL_M2], CHANNEL_MIN, CHANNEL_MAX, -MOTOR_MAX_SPEED, MOTOR_MAX_SPEED);
-    if(abs(M1_speed) > SWITCHPOINT || abs(M2_speed) > SWITCHPOINT) {
-      stepMode = 8;
-      M1_speed = M1_speed / 2;
-      M2_speed = M2_speed / 2;
+
+    if (raw_channels[CHANNEL_GEAR] > 1024) {
+      stepMode = 16;
     } else {
       stepMode = 32;
     }
@@ -293,15 +289,15 @@ void loop()
     }
     if (failSafe)
     {
-      setMotorSpeed(1,0,0);
-      setMotorSpeed(2,0,0);
+      setMotorSpeed(1,0);
+      setMotorSpeed(2,0);
       enableMotors(false);
     }
     else
     {
       MOTOR_STEP(stepMode);
-      setMotorSpeed(1,M1_speed,stepMode);
-      setMotorSpeed(2,M2_speed,stepMode);
+      setMotorSpeed(1,M1_speed);
+      setMotorSpeed(2,M2_speed);
       if(M1_speed == 0 && M1_speed==0) {
         if(idleTimer == 0) {
           enableMotors(false);
